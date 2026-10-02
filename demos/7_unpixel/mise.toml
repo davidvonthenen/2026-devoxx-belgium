@@ -1,0 +1,295 @@
+# mise — single source of truth for the toolchain, env, and project commands.
+# Docs: https://mise.jdx.dev
+#
+#   mise run setup      # install tools + wire git hooks (one-shot bootstrap)
+#   mise run            # list available tasks
+#   mise run lint       # full Go style-guide gate
+#   mise run ci         # everything CI runs (lint + meta-lint + tests)
+#   mise run release:snapshot   # build the CLI locally with goreleaser (no publish)
+#
+# Token optimization: build/test/lint tasks route through scripts/rtkx.sh, which uses
+# `rtk err` when rtk is installed (compact output, exit code preserved) and runs raw
+# otherwise. Install rtk with `mise run tools:rtk` (optional, never blocks).
+
+min_version = "2024.1.0"
+
+# Required for the [hooks] enter/leave feature below.
+[settings]
+experimental = true
+
+# ── Tools ─────────────────────────────────────────────────────────────────────
+# Pinned versions → everyone (and CI) gets the exact same binaries.
+[tools]
+go            = "1.26.4"
+gh            = "latest"   # GitHub CLI (aqua:cli/cli) — used project-wide via scripts/ghx.sh
+golangci-lint = "2.12.2"   # aqua:golangci/golangci-lint
+gofumpt       = "latest"   # stricter gofmt (guide: Formatting)
+shellcheck    = "latest"   # lints our bash hook scripts
+gitleaks      = "latest"   # secret scanner (pre-commit gate + CI history scan)
+"go:github.com/securego/gosec/v2/cmd/gosec" = "latest"  # Go SAST (pre-commit gate)
+"go:golang.org/x/vuln/cmd/govulncheck"      = "latest"  # reachable dep/stdlib vulns (pre-commit gate)
+"go:golang.org/x/perf/cmd/benchstat"        = "latest"  # compare benchmark runs (A/B, regression check)
+"go:github.com/dkorunic/betteralign/cmd/betteralign" = "latest"  # struct field alignment (memory layout)
+syft          = "latest"   # SBOM generation (CI)
+grype         = "latest"   # scan SBOM for CVEs (CI)
+gotestsum     = "latest"   # nicer test output + JUnit for CI
+goreleaser    = "latest"   # cross-platform release builds of the CLI
+actionlint    = "latest"   # lints GitHub Actions workflows
+yamlfmt       = "latest"   # lints/formats YAML config (Go binary, no python dep)
+watchexec     = "latest"   # backs `mise watch` (TDD loop)
+
+# ── Environment ───────────────────────────────────────────────────────────────
+# Auto-loaded when you cd into the project (with mise shell activation).
+[env]
+# Reproducible builds: fail instead of silently editing go.mod during build/test.
+GOFLAGS = "-mod=readonly"
+# The port is pure Go — keep it that way. CGO off everywhere (build, test, release)
+# guarantees static, cross-compilable binaries and a cgo-free dependency tree.
+CGO_ENABLED = "0"
+# Minimum test coverage enforced by `mise run cover:check` / CI. The module sits at
+# ~93% (only the 1-line placeholder cmd/unpixel main is uncovered); floor set with a
+# margin to catch regressions without being brittle.
+COVER_MIN = "85"
+# Put `go install`ed helpers on PATH for tools not (yet) managed by mise.
+_.path = ["{{ env.HOME }}/go/bin"]
+
+# ── Hooks ─────────────────────────────────────────────────────────────────────
+# Auto-wire the git hooks whenever you enter the project (idempotent, silent).
+[hooks]
+enter = "git config core.hooksPath .githooks >/dev/null 2>&1 || true"
+
+# ── Tasks (the commands to run) ───────────────────────────────────────────────
+[tasks.fmt]
+description = "Format all Go code with gofumpt"
+run = "gofumpt -w ."
+
+[tasks.vet]
+description = "go vet"
+run = "./scripts/rtkx.sh go vet ./..."
+
+[tasks.build]
+description = "Build all packages"
+# -pgo=off: this is a compile-check (no -o, binaries discarded); PGO is only needed
+# for the release binary (goreleaser) and would recompile cmd/unpixel's deps with a
+# different fingerprint, risking a cache race under concurrent builds (golang/go#61376).
+run = "./scripts/rtkx.sh go build -pgo=off ./..."
+
+[tasks.align]
+description = "Reorder struct fields for optimal memory alignment (betteralign -apply)"
+run = "betteralign -apply ./... && gofumpt -w ."
+
+[tasks."align:check"]
+description = "Report structs whose field order wastes memory (betteralign, no changes)"
+run = "betteralign ./..."
+
+[tasks.gen]
+description = "Generate test fixtures (reference images + manifest) via go:generate"
+run = "go generate ./..."
+
+[tasks."gen:check"]
+description = "Verify committed fixtures match the generator (fails on drift)"
+run = "go generate ./... && git diff --exit-code -- testdata/fixtures"
+
+[tasks.test]
+description = "Run tests (gotestsum, readable output)"
+# -pgo=off: tests never need PGO, and disabling it keeps dep fingerprints uniform
+# across concurrent builds (see test:ci for the golang/go#61376 rationale).
+run = "./scripts/rtkx.sh gotestsum --format pkgname -- -pgo=off ./..."
+
+[tasks."test:ci"]
+description = "Run tests once, producing a JUnit report AND coverage.out"
+# -pgo=off: `mise run ci` runs this concurrently with lint (go vet) / scan:code
+# (govulncheck) / cgo:check, which all recompile the same packages. Because
+# cmd/unpixel ships default.pgo, -pgo=auto (the default) recompiles cmd/unpixel's
+# deps (e.g. mosaictext) WITH PGO for its test binary while the concurrent tasks
+# build them WITHOUT PGO — two fingerprints in the shared GOCACHE race and the
+# cmd/unpixel test link fails with "fingerprint mismatch" (golang/go#61376). Tests
+# never need PGO, so disabling it makes every build's dep fingerprints uniform.
+run = "./scripts/rtkx.sh gotestsum --junitfile junit.xml --format pkgname -- -pgo=off -short -timeout=8m -covermode=atomic -coverprofile=coverage.out ./..."
+
+[tasks."test:watch"]
+description = "Re-run tests on every file change (TDD loop)"
+run = "mise watch -t test"
+
+[tasks.bench]
+description = "Run Go benchmarks (-benchmem)"
+run = "./scripts/bench.sh run"
+
+[tasks."bench:baseline"]
+description = "Run benchmarks and save bench-baseline.txt (before optimizing)"
+run = "./scripts/bench.sh baseline"
+
+[tasks."bench:record"]
+description = "Record key benchmarks to benchmarks/latest.txt (commit it to compare across commits)"
+run = "go test -run '^$' -bench 'DiscoverOffsets/workers_1|GuidedSearch|XImage_Render|FillWhite|BlockAverage_Pixelate' -benchmem -count 6 ./internal/... | tee benchmarks/latest.txt"
+
+[tasks."bench:compare"]
+description = "Run benchmarks and benchstat vs baseline (after optimizing)"
+run = "./scripts/bench.sh compare"
+
+[tasks."bench:panel"]
+description = "Recovery quality+speed panel over the fixture set, diffed vs the recorded baseline"
+run = "./scripts/bench-panel.sh run"
+
+[tasks."bench:panel:strict"]
+description = "Recovery panel, failing on a decode-quality regression vs the baseline (CI-grade)"
+run = "./scripts/bench-panel.sh strict"
+
+[tasks."bench:panel:record"]
+description = "Run the recovery panel and promote it to benchmarks/quality-baseline.json (commit it)"
+run = "./scripts/bench-panel.sh record"
+
+[tasks.cover]
+description = "Test coverage report (coverage.out + total %)"
+run = "./scripts/cover.sh"
+
+[tasks."cover:check"]
+description = "Enforce minimum coverage (COVER_MIN); reuses coverage.out from test:ci"
+depends = ["test:ci"]
+run = "./scripts/cover.sh --check"
+
+[tasks.lint]
+description = "Google Go style-guide gate (gofmt + vet + golangci-lint + build; tests run via test:ci)"
+run = "./scripts/rtkx.sh ./scripts/lint.sh"
+
+[tasks."lint:staged"]
+description = "Style-guide gate on staged files only (used by the git pre-commit hook)"
+run = "./scripts/rtkx.sh ./scripts/lint.sh --staged"
+
+[tasks."lint:sh"]
+description = "Lint the bash hook scripts with shellcheck"
+run = "shellcheck -x --source-path=SCRIPTDIR .githooks/* .claude/hooks/*.sh .claude/hooks/lib/*.sh scripts/*.sh"
+
+[tasks."lint:yaml"]
+description = "Lint YAML config formatting with yamlfmt"
+run = "yamlfmt -lint .golangci.yml .github/workflows"
+
+[tasks."lint:actions"]
+description = "Lint GitHub Actions workflows with actionlint"
+run = "actionlint"
+
+[tasks."scan:secrets"]
+description = "Scan full git history for leaked secrets (gitleaks)"
+run = "./scripts/rtkx.sh gitleaks git --redact ."
+
+[tasks."scan:secrets:staged"]
+description = "Scan staged changes for secrets (pre-commit gate)"
+run = "./scripts/rtkx.sh gitleaks git --staged --redact"
+
+[tasks."scan:code"]
+description = "Code vuln scan: gosec (SAST) + govulncheck (reachable CVEs)"
+run = "./scripts/sec-scan.sh"
+
+[tasks."scan:code:staged"]
+description = "Code vuln scan on staged Go (pre-commit gate)"
+run = "./scripts/sec-scan.sh --staged"
+
+[tasks.sbom]
+description = "Generate a CycloneDX SBOM (syft)"
+run = "syft scan dir:. -o cyclonedx-json=sbom.cdx.json -q"
+
+[tasks."scan:sbom"]
+description = "Scan the SBOM for CVEs (grype) — fails on high/critical"
+depends = ["sbom"]
+run = "./scripts/rtkx.sh grype sbom:sbom.cdx.json --fail-on high"
+
+[tasks.leak]
+# Goroutine-leak gate. goleak runs automatically at every package test boundary via
+# the per-package TestMain (go.uber.org/goleak), so leak detection is ALREADY enforced
+# by `test:ci` (hence by `ci`) at no extra cost and with no CGO. This task is the
+# explicit, thorough on-demand run: the FULL suite, caged so the historical heavy
+# mosaictext path can't OOM-freeze the machine. Pure Go — no -race (which would require
+# CGO and is forbidden here); use `CGO_ENABLED=1 go test -race ./...` only as a manual,
+# local-only deep check. See .claude/skills/goroutine-leak-check.
+description = "Goroutine-leak gate: goleak (via TestMain) over the full suite, memory-caged"
+run = "./scripts/gotest-caged.sh go test -pgo=off -timeout=8m ./..."
+
+[tasks.ci]
+description = "Everything CI must pass"
+depends = ["cgo:check", "scan:secrets", "scan:code", "scan:sbom", "lint", "lint:sh", "lint:yaml", "lint:actions", "test:ci", "cover:check"]
+
+[tasks.release]
+description = "Cross-platform release build + publish (goreleaser)"
+run = "goreleaser release --clean"
+
+[tasks."release:snapshot"]
+description = "Local cross-platform build, no publish (goreleaser)"
+run = "goreleaser release --snapshot --clean"
+
+[tasks."tools:rtk"]
+description = "Best-effort install of rtk (token-optimized task output) — never blocks"
+# rtk is optional: scripts/rtkx.sh uses it only if present. This installs the prebuilt
+# binary from rtk's GitHub releases (github:rtk-ai/rtk backend — no compilation), and
+# always exits 0 so it can't block setup/CI.
+run = '''
+if command -v rtk >/dev/null 2>&1; then
+  echo "✓ rtk already available: $(rtk --version 2>/dev/null)"
+  exit 0
+fi
+echo "Installing rtk from GitHub releases (prebuilt, non-blocking)…"
+mise use -g "github:rtk-ai/rtk@latest" >/dev/null 2>&1 \
+  && echo "✓ rtk installed via mise (github releases)" \
+  || echo "⚠ rtk not installed — tasks still run, just without token optimization."
+exit 0
+'''
+
+[tasks.gh]
+description = "GitHub CLI via mise + rtk (use: mise run gh -- pr list)"
+run = "./scripts/ghx.sh"
+
+[tasks."pgo:update"]
+description = "Regenerate cmd/unpixel/default.pgo from hot-path benchmarks (commit the result)"
+run = "./scripts/gotest-caged.sh go test -run '^$' -bench 'BenchmarkGuidedSearch$|BenchmarkGuidedSearch_bounded|BenchmarkDiscoverOffsets' -benchmem -benchtime=20s -cpuprofile=cmd/unpixel/default.pgo ./internal/search/"
+
+[tasks."cgo:check"]
+description = "Absolute rule gate: fail if any package uses CGO (project is pure Go)"
+run = "./scripts/cgo-check.sh"
+
+[tasks.clean]
+description = "Remove regenerable build/scan artifacts + go build cache"
+run = "./scripts/clean-artifacts.sh"
+
+[tasks.journal]
+description = "Evolving test journal: run all corpora (fixtures/blur/real/wild) through UnPixel (zero-config + best-config) and append a timestamped run to docs/JOURNAL.md + benchmarks/journal/*.json"
+run = "./scripts/gotest-caged.sh go test -tags journal -run TestJournal -v -timeout 60m . && ./scripts/journal-trend-check.sh"
+
+[tasks.infoleak]
+description = "Information-leak feasibility study (#8): AA / JPEG / multi-offset measurement, memory-caged"
+run = "./scripts/gotest-caged.sh go test -tags infoleak -run InfoLeak -v ./internal/infoleak/"
+
+[tasks.campaign]
+description = "MCP decode campaign: exercise the opt-in features (#4 font-prior, #5 rerank, #6 expected_format, engine best-config) over testdata and derive lessons, memory-caged"
+run = "./scripts/gotest-caged.sh go test -tags mcpcampaign -run Campaign -v -timeout 30m ./mcp/"
+
+[tasks.mfmeasure]
+description = "Multi-frame measurement: single-frame vs DecodeMultiFrameAuto on genuine sharp-source fixtures (observational, memory-caged)"
+run = "./scripts/gotest-caged.sh go test -tags mfmeasure -run TestMultiFrameMeasure -v -timeout 15m ./mosaictext/"
+
+[tasks.didmeasure]
+description = "DID digit measurement: default engine vs DID column-trellis on sick digit fixtures (observational, memory-caged)"
+run = "./scripts/gotest-caged.sh go test -tags didmeasure -run TestDIDDigitsMeasure -v -timeout 20m ./mosaictext/"
+
+[tasks.geomeasure]
+description = "Geometry diagnostic: per-stage accuracy (localize/grid/segment/font) on real and wild corpora, writes benchmarks/geometry/ JSON + docs/GEOMETRY.md (observational, memory-caged)"
+run = "./scripts/gotest-caged.sh go test -tags geomeasure -run TestGeomeasure -v -timeout 15m ."
+
+[tasks.verifymeasure]
+description = "Verify spike (P1): does propose/verify discriminate truth from hard decoys on sick+context corpora? Writes benchmarks/verify/ JSON + docs/VERIFY-SPIKE.md (observational, memory-caged)"
+run = "./scripts/gotest-caged.sh go test -tags verifymeasure -run TestVerifySpike -v -timeout 15m ."
+
+[tasks."trend:check"]
+description = "Compare the two most recent docs/JOURNAL.md évolution rows; fail on any per-corpus exact/≥70% regression across the full testdata set (warn on mean drop). Runs automatically after `journal`; STRICT=1 also fails on a mean drop > MEAN_DROP_PP."
+run = "./scripts/journal-trend-check.sh"
+
+[tasks."clean:check"]
+description = "Pre-commit gate: tidy artifacts + block any staged artifact"
+run = "./scripts/clean-artifacts.sh --check"
+
+[tasks."hooks:install"]
+description = "Point git at .githooks (pre-commit + post-commit)"
+run = "./scripts/install-hooks.sh"
+
+[tasks.setup]
+description = "One-shot bootstrap: install tools + wire git hooks (+ optional rtk)"
+depends = ["hooks:install", "tools:rtk"]
+run = "mise install"

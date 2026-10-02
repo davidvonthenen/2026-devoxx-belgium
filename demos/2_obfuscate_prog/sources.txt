@@ -1,0 +1,12 @@
+
+Source:
+https://www.reddit.com/r/Epstein/comments/1pw18q1/badly_redacted_court_files_not_2025_or_efta_docs/
+but then went to:
+https://www.reddit.com/r/Epstein/comments/1puypq4/here_is_a_script_to_bulk_check_future_redactions/
+
+Code:
+https://www.reddit.com/r/Epstein/comments/1puypq4/here_is_a_script_to_bulk_check_future_redactions/
+https://gist.github.com/CodyEngel/f7cb1ee7dc6850e69829fd00be6fc302
+
+Blog:
+https://medium.com/@pymupdf/unmasking-fake-redactions-with-pymupdf-82de0b34d21d

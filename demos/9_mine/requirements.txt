@@ -1,0 +1,6 @@
+# Training and inference dependencies. Keep PyTorch aligned with the README.
+# For NVIDIA CUDA or Linux CPU-only wheels, install the matching torch wheel first.
+torch==2.10.0
+numpy>=1.26,<3
+Pillow>=10,<13
+safetensors>=0.4.5,<1

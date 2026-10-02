@@ -1,0 +1,139 @@
+
+URL:
+https://github.com/oioio-space/unpixel
+
+
+Environment:
+go version
+go version go1.26.4 darwin/arm64
+
+
+
+Commands:
+cd examples/01-basic-recovery
+unpixel --redaction mosaic --charset "admin xyz0" -b 8 images/admin.png
+
+Sweeping 9 fonts...
+Confidence: 1.00 (high)
+
+Font ranking (best fit first):
+  1. Liberation Sans                  "admin"              total=0.0000
+  2. JetBrains Mono                   "m nn"               total=0.2747
+  3. Noto Sans Mono                   "n0"                 total=0.2967
+  4. Adwaita Mono                     "ad n"               total=0.2976
+  5. Liberation Serif                 "n     00"           total=0.3095
+  6. Source Code Pro                  "m"                  total=0.3626
+  7. Caladea                          "y   n"              total=0.3780
+  8. Liberation Mono                  "z"                  total=1.0000
+  9. Carlito                          "z"                  total=1.0000
+
+Best font: Liberation Sans
+admin
+
+
+cd ../..
+
+
+
+cd examples/06-automation
+unpixel --redaction mosaic --charset "admin xyz0" -b 8 --format json images/admin.png
+
+(devoxx-be-tair) vonthd@vonthds-max:06-automation$ unpixel --redaction mosaic --charset "admin xyz0" -b 8 --format json images/admin.png
+{
+  "best_guess": "admin",
+  "font": "Liberation Sans",
+  "top": [
+    {
+      "guess": "admin",
+      "score": 0
+    },
+    {
+      "guess": "admin",
+      "score": 0
+    },
+    {
+      "guess": "admia",
+      "score": 0
+    },
+    {
+      "guess": "adn in",
+      "score": 0
+    },
+    {
+      "guess": "adn in",
+      "score": 0
+    }
+  ],
+  "fonts": [
+    {
+      "font": "Liberation Sans",
+      "best_guess": "admin",
+      "total_score": 0,
+      "best_score": 0
+    },
+    {
+      "font": "JetBrains Mono",
+      "best_guess": "m nn",
+      "total_score": 0.27472527472527475,
+      "best_score": 0
+    },
+    {
+      "font": "Noto Sans Mono",
+      "best_guess": "n0",
+      "total_score": 0.2967032967032967,
+      "best_score": 0
+    },
+    {
+      "font": "Adwaita Mono",
+      "best_guess": "ad n",
+      "total_score": 0.2976190476190476,
+      "best_score": 0
+    },
+    {
+      "font": "Liberation Serif",
+      "best_guess": "n     00",
+      "total_score": 0.30952380952380953,
+      "best_score": 0
+    },
+    {
+      "font": "Source Code Pro",
+      "best_guess": "m",
+      "total_score": 0.3626373626373626,
+      "best_score": 0
+    },
+    {
+      "font": "Caladea",
+      "best_guess": "y   n",
+      "total_score": 0.37797619047619047,
+      "best_score": 0
+    },
+    {
+      "font": "Liberation Mono",
+      "best_guess": "z",
+      "total_score": 1,
+      "best_score": 0.28991596638655465
+    },
+    {
+      "font": "Carlito",
+      "best_guess": "z",
+      "total_score": 1,
+      "best_score": 0.34285714285714286
+    }
+  ],
+  "offset": {
+    "x": 0,
+    "y": 0
+  },
+  "best_score": 0,
+  "total_score": 0,
+  "fidelity": 1,
+  "trustworthy": true,
+  "confidence": 1,
+  "ambiguity": 0,
+  "evaluated": 0,
+  "elapsed_ms": 1602
+}
+
+
+cd ../..
+

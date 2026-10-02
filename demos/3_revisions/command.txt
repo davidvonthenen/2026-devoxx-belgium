@@ -1,0 +1,47 @@
+
+See previous versions:
+grep -aob -E 'startxref|%%EOF' EFTA00000001.pdf
+
+# revisions script
+python pdf_revisions.py EFTA00000001.pdf --list
+python pdf_revisions.py EFTA00000001.pdf --list --objects
+
+# oldest
+python pdf_revisions.py EFTA00000001.pdf \
+  --revision 1 \
+  --output EFTA00000001.oldest.pdf
+
+# all
+python pdf_revisions.py EFTA00000001.pdf \
+  --all \
+  --output-dir EFTA00000001-recovered
+
+
+
+
+# qpdf
+qpdf --suppress-recovery --check EFTA00000001.previous.pdf
+
+# Inspect its effective trailer.
+qpdf --suppress-recovery --show-object=trailer \
+  EFTA00000001.previous.pdf
+
+# Inspect its effective cross-reference entries.
+qpdf --suppress-recovery --show-xref \
+  EFTA00000001.previous.pdf
+
+# dump
+qpdf --show-object=42,0 EFTA00000001.previous.pdf
+
+# For a stream object, decode supported filters into a separate file.
+qpdf --show-object=42,0 --filtered-stream-data \
+  EFTA00000001.previous.pdf > object42.bin
+
+
+
+# another tool
+https://github.com/enferex/pdfresurrect
+
+
+
+

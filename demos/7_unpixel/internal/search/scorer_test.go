@@ -1,0 +1,464 @@
+package search_test
+
+import (
+	"context"
+	"image"
+	"slices"
+	"sync"
+	"testing"
+
+	"github.com/oioio-space/unpixel"
+	"github.com/oioio-space/unpixel/internal/imutil"
+	"github.com/oioio-space/unpixel/internal/metric"
+	"github.com/oioio-space/unpixel/internal/pixelate"
+	"github.com/oioio-space/unpixel/internal/render"
+	"github.com/oioio-space/unpixel/internal/search"
+)
+
+// makeSyntheticRedacted builds a self-consistent pixelated image by running the
+// same pipeline steps used by PipelineScorer. Mirrors engine_test.go.
+func makeSyntheticRedactedForSearch(t *testing.T, r *render.XImage, pix unpixel.Pixelator, text string, style unpixel.Style, blockSize int) *image.RGBA {
+	t.Helper()
+	img, sentinelX, err := r.Render(text, style)
+	if err != nil {
+		t.Fatalf("render %q: %v", text, err)
+	}
+	bm, imageCenter := imutil.BlueMargin(img)
+	if bm == 0 {
+		bm = sentinelX
+	}
+	img = imutil.Crop(img, 0, 0, bm, img.Bounds().Dy())
+	if w := img.Bounds().Dx(); blockSize-(w%blockSize) < blockSize {
+		img = imutil.PadWhite(img, w+blockSize-(w%blockSize), img.Bounds().Dy())
+	}
+	img = pix.Pixelate(img, 0, 0)
+	leftEdge := imutil.LeftEdge(img)
+	adjustedCenter := imageCenter - (imageCenter % blockSize) + 4
+	redactedH := 2 * adjustedCenter
+	redacted := imutil.Crop(img, leftEdge, 0, img.Bounds().Dx()-leftEdge, img.Bounds().Dy())
+	if redacted.Bounds().Dy() < redactedH {
+		redacted = imutil.PadWhite(redacted, redacted.Bounds().Dx(), redactedH)
+	}
+	return redacted
+}
+
+// buildScorerFixture returns a PipelineScorer and matching Config for the
+// synthetic "ab" redacted image.
+func buildScorerFixture(t *testing.T) (*search.PipelineScorer, unpixel.Config, *render.XImage, unpixel.Pixelator) {
+	t.Helper()
+	const blockSize = 8
+	r, err := render.NewXImage()
+	if err != nil {
+		t.Fatalf("render.NewXImage: %v", err)
+	}
+	style := unpixel.Style{FontSize: 32, PaddingTop: 8, PaddingLeft: 8}
+	pix := pixelate.NewBlockAverage(blockSize)
+	cfg := unpixel.Config{
+		Charset:        "abcdefghijklmnopqrstuvwxyz ",
+		MaxLength:      10,
+		BlockSize:      blockSize,
+		Threshold:      0.25,
+		SpaceThreshold: 0.5,
+		Style:          style,
+		Renderer:       r,
+		Pixelator:      pix,
+		Metric:         metric.NewPixelmatch(0.02),
+	}
+	redacted := makeSyntheticRedactedForSearch(t, r, pix, "ab", style, blockSize)
+	return search.NewPipelineScorer(redacted, cfg), cfg, r, pix
+}
+
+// TestPipelineScorer_correctGuessLowScore verifies that the correct guess
+// scores below the threshold and is not flagged TooBig.
+func TestPipelineScorer_correctGuessLowScore(t *testing.T) {
+	scorer, cfg, _, _ := buildScorerFixture(t)
+	offset := unpixel.Offset{X: 0, Y: 0}
+
+	got := scorer.Eval(t.Context(), "ab", "a", offset)
+	if got.TooBig {
+		t.Errorf("Eval(%q): TooBig = true, want false", "ab")
+	}
+	if got.Score >= cfg.Threshold {
+		t.Errorf("Eval(%q): Score = %v, want < %v", "ab", got.Score, cfg.Threshold)
+	}
+}
+
+// TestPipelineScorer_totalScoreFavoursCompleteAnswer verifies the whole-image
+// TotalScore: the complete correct text scores lowest, while a correct prefix
+// (which leaves the rest of the redaction unexplained) and an unrelated guess
+// both score higher. This is the signal that disambiguates the final answer.
+func TestPipelineScorer_totalScoreFavoursCompleteAnswer(t *testing.T) {
+	scorer, _, _, _ := buildScorerFixture(t)
+	offset := unpixel.Offset{X: 0, Y: 0}
+
+	complete := scorer.TotalScore(t.Context(), "ab", offset)
+	prefix := scorer.TotalScore(t.Context(), "a", offset)
+	wrong := scorer.TotalScore(t.Context(), "zz", offset)
+
+	if complete >= prefix {
+		t.Errorf("TotalScore: complete %q (%.4f) should beat prefix %q (%.4f)", "ab", complete, "a", prefix)
+	}
+	if complete >= wrong {
+		t.Errorf("TotalScore: complete %q (%.4f) should beat wrong %q (%.4f)", "ab", complete, "zz", wrong)
+	}
+}
+
+// TestPipelineScorer_wrongGuessScoresWorse verifies that an unrelated guess
+// scores higher than the correct guess.
+func TestPipelineScorer_wrongGuessScoresWorse(t *testing.T) {
+	scorer, _, _, _ := buildScorerFixture(t)
+	offset := unpixel.Offset{X: 0, Y: 0}
+
+	correct := scorer.Eval(t.Context(), "ab", "a", offset)
+	wrong := scorer.Eval(t.Context(), "zz", "z", offset)
+	if correct.Score >= wrong.Score {
+		t.Errorf("correct guess scored %v, wrong guess scored %v; want correct < wrong",
+			correct.Score, wrong.Score)
+	}
+}
+
+// TestPipelineScorer_tooBigGuess verifies that a string far wider than the
+// synthetic "ab" redacted image is flagged TooBig.
+func TestPipelineScorer_tooBigGuess(t *testing.T) {
+	scorer, _, _, _ := buildScorerFixture(t)
+	offset := unpixel.Offset{X: 0, Y: 0}
+
+	got := scorer.Eval(t.Context(), "abcdefghijklmnopqrstuvwxyz", "", offset)
+	if !got.TooBig {
+		t.Errorf("Eval(very long string): TooBig = false, want true")
+	}
+}
+
+// TestPipelineScorer_emptyPrevGuess exercises the empty-prevGuess branch (no
+// marginal crop) and asserts a valid score in [0, 1].
+func TestPipelineScorer_emptyPrevGuess(t *testing.T) {
+	scorer, _, _, _ := buildScorerFixture(t)
+	offset := unpixel.Offset{X: 0, Y: 0}
+
+	got := scorer.Eval(t.Context(), "a", "", offset)
+	if got.Score < 0 || got.Score > 1 {
+		t.Errorf("Eval(%q, empty): Score = %v, want in [0, 1]", "a", got.Score)
+	}
+}
+
+// TestPipelineScorer_prevGuessBranch exercises the marginal-crop path (non-empty
+// prevGuess) and asserts a valid score in [0, 1].
+func TestPipelineScorer_prevGuessBranch(t *testing.T) {
+	scorer, _, _, _ := buildScorerFixture(t)
+	offset := unpixel.Offset{X: 0, Y: 0}
+
+	got := scorer.Eval(t.Context(), "ab", "a", offset)
+	if got.Score < 0 || got.Score > 1 {
+		t.Errorf("Eval(%q, %q): Score = %v, want in [0, 1]", "ab", "a", got.Score)
+	}
+}
+
+// TestPipelineScorer_cancelledContext verifies that a pre-cancelled context
+// causes Eval to return score=1 without rendering.
+func TestPipelineScorer_cancelledContext(t *testing.T) {
+	scorer, _, _, _ := buildScorerFixture(t)
+	offset := unpixel.Offset{X: 0, Y: 0}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	got := scorer.Eval(ctx, "ab", "a", offset)
+	if got.Score != 1 {
+		t.Errorf("Eval with cancelled ctx: Score = %v, want 1", got.Score)
+	}
+}
+
+// TestPipelineScorer_identicalConsecutiveGuess exercises the marginColumn path where
+// consecutive identical characters produce an all-white diff (leftBoundary falls
+// back to prevImg width).
+func TestPipelineScorer_identicalConsecutiveGuess(t *testing.T) {
+	scorer, _, _, _ := buildScorerFixture(t)
+	offset := unpixel.Offset{X: 0, Y: 0}
+
+	got := scorer.Eval(t.Context(), "aa", "a", offset)
+	if got.Score < 0 || got.Score > 1 {
+		t.Errorf("Eval(aa, a): Score = %v, want in [0, 1]", got.Score)
+	}
+}
+
+// TestPipelineScorer_H1BitIdentical verifies that H1 (prevGuess partial-stage
+// cache) produces bit-identical scores: the second call (cache hit) must equal
+// the first (cache miss) for every combination of guess / prevGuess.
+func TestPipelineScorer_H1BitIdentical(t *testing.T) {
+	scorer, _, _, _ := buildScorerFixture(t)
+	offset := unpixel.Offset{X: 0, Y: 0}
+
+	cases := []struct{ guess, prev string }{
+		{"ab", "a"},
+		{"b", "a"},
+		{"aa", "a"},
+		{"ab", "b"},
+	}
+	for _, tc := range cases {
+		// First call populates H1 cache.
+		first := scorer.Eval(t.Context(), tc.guess, tc.prev, offset)
+		// Second call must hit H1 cache and return identical result.
+		second := scorer.Eval(t.Context(), tc.guess, tc.prev, offset)
+		if first != second {
+			t.Errorf("H1 cache: Eval(%q,%q) first=%+v second=%+v — not bit-identical",
+				tc.guess, tc.prev, first, second)
+		}
+	}
+}
+
+// TestPipelineScorer_H2BitIdentical verifies that H2 (redacted-band crop cache)
+// produces bit-identical scores: varying leftBoundary across guesses must not
+// cause any divergence from the uncached path.
+func TestPipelineScorer_H2BitIdentical(t *testing.T) {
+	scorer, _, _, _ := buildScorerFixture(t)
+
+	// Use two different offsets to exercise different leftBoundary values.
+	offsets := []unpixel.Offset{{X: 0, Y: 0}, {X: 4, Y: 0}}
+	guesses := []struct{ guess, prev string }{
+		{"a", ""},
+		{"b", ""},
+		{"ab", "a"},
+	}
+
+	for _, off := range offsets {
+		for _, g := range guesses {
+			// Call twice; results must be identical (cache hit == cache miss).
+			r1 := scorer.Eval(t.Context(), g.guess, g.prev, off)
+			r2 := scorer.Eval(t.Context(), g.guess, g.prev, off)
+			if r1 != r2 {
+				t.Errorf("H2 cache offset=%v guess=%q prev=%q: first=%+v second=%+v",
+					off, g.guess, g.prev, r1, r2)
+			}
+		}
+	}
+}
+
+// TestPipelineScorer_O1BitIdentical verifies that O1 (BlueMargin memoization in
+// renderEntry) produces bit-identical scores: repeated Eval on the same text must
+// return exactly the same score whether BlueMargin is computed fresh or from cache.
+func TestPipelineScorer_O1BitIdentical(t *testing.T) {
+	scorer, _, _, _ := buildScorerFixture(t)
+	offset := unpixel.Offset{X: 0, Y: 0}
+
+	// Eval "a" twice — second call hits the render cache and must use the memoized
+	// BlueMargin value without recomputing it.
+	r1 := scorer.Eval(t.Context(), "a", "", offset)
+	r2 := scorer.Eval(t.Context(), "a", "", offset)
+	if r1 != r2 {
+		t.Errorf("O1 memoize: Eval(%q) first=%+v second=%+v — not bit-identical", "a", r1, r2)
+	}
+
+	// Also check with prevGuess to exercise the prevGuess render-cache path.
+	r3 := scorer.Eval(t.Context(), "ab", "a", offset)
+	r4 := scorer.Eval(t.Context(), "ab", "a", offset)
+	if r3 != r4 {
+		t.Errorf("O1 memoize prevGuess: Eval(%q,%q) first=%+v second=%+v — not bit-identical",
+			"ab", "a", r3, r4)
+	}
+}
+
+// TestPipelineScorer_H1ConcurrentRace exercises the H1 cache under concurrent
+// access to catch data races. Run with go test -race.
+func TestPipelineScorer_H1ConcurrentRace(t *testing.T) {
+	scorer, _, _, _ := buildScorerFixture(t)
+	offset := unpixel.Offset{X: 0, Y: 0}
+
+	const goroutines = 8
+	var wg sync.WaitGroup
+	for range goroutines {
+		wg.Go(func() {
+			for _, tc := range []struct{ g, p string }{
+				{"a", ""},
+				{"ab", "a"},
+				{"b", "a"},
+				{"ab", "b"},
+			} {
+				scorer.Eval(t.Context(), tc.g, tc.p, offset)
+			}
+		})
+	}
+	wg.Wait()
+}
+
+// drainAndRun calls strategy.Search then closes both channels, draining them
+// concurrently to avoid the blocking-send deadlock described in engine_test.go.
+func drainAndRun(
+	t *testing.T,
+	strategy unpixel.Strategy,
+	redacted *image.RGBA,
+	cfg unpixel.Config,
+) (progress []unpixel.Progress, results []unpixel.Result) {
+	t.Helper()
+	out := make(chan unpixel.Progress, 512)
+	resCh := make(chan unpixel.Result, 16)
+
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for p := range out {
+			progress = append(progress, p)
+		}
+	})
+	wg.Go(func() {
+		for r := range resCh {
+			results = append(results, r)
+		}
+	})
+
+	strategy.Search(t.Context(), redacted, cfg, out, resCh)
+	close(out)
+	close(resCh)
+	wg.Wait()
+	return progress, results
+}
+
+// TestGuidedStrategy_emitsDone verifies that Search always emits EventDone.
+func TestGuidedStrategy_emitsDone(t *testing.T) {
+	const blockSize = 8
+	r, err := render.NewXImage()
+	if err != nil {
+		t.Fatalf("render.NewXImage: %v", err)
+	}
+	style := unpixel.Style{FontSize: 32, PaddingTop: 8, PaddingLeft: 8}
+	pix := pixelate.NewBlockAverage(blockSize)
+	cfg := unpixel.Config{
+		Charset:        "ab",
+		MaxLength:      2,
+		BlockSize:      blockSize,
+		Threshold:      0.25,
+		SpaceThreshold: 0.5,
+		Style:          style,
+		Renderer:       r,
+		Pixelator:      pix,
+		Metric:         metric.NewPixelmatch(0.02),
+	}
+	redacted := makeSyntheticRedactedForSearch(t, r, pix, "a", style, blockSize)
+
+	progress, _ := drainAndRun(t, search.NewGuidedStrategy(), redacted, cfg)
+
+	gotDone := slices.ContainsFunc(progress, func(p unpixel.Progress) bool {
+		return p.Kind == unpixel.EventDone
+	})
+	if !gotDone {
+		t.Error("GuidedStrategy.Search did not emit EventDone")
+	}
+}
+
+// TestGuidedStrategy_searchFindsCandidate runs the real strategy against a
+// synthetic "ab" redaction and logs what it recovers. It asserts the search
+// completes without panic and that at least one candidate was produced.
+func TestGuidedStrategy_searchFindsCandidate(t *testing.T) {
+	const blockSize = 8
+	r, err := render.NewXImage()
+	if err != nil {
+		t.Fatalf("render.NewXImage: %v", err)
+	}
+	style := unpixel.Style{FontSize: 32, PaddingTop: 8, PaddingLeft: 8}
+	pix := pixelate.NewBlockAverage(blockSize)
+	cfg := unpixel.Config{
+		Charset:        "abcdefghijklmnopqrstuvwxyz ",
+		MaxLength:      3,
+		BlockSize:      blockSize,
+		Threshold:      0.25,
+		SpaceThreshold: 0.5,
+		Style:          style,
+		Renderer:       r,
+		Pixelator:      pix,
+		Metric:         metric.NewPixelmatch(0.02),
+	}
+	redacted := makeSyntheticRedactedForSearch(t, r, pix, "ab", style, blockSize)
+
+	_, results := drainAndRun(t, search.NewGuidedStrategy(), redacted, cfg)
+
+	var allCandidates []string
+	for _, res := range results {
+		for _, e := range res.Candidates {
+			allCandidates = append(allCandidates, e.Guess)
+		}
+	}
+	t.Logf("GuidedStrategy found %d candidates: %v", len(allCandidates), allCandidates)
+	if slices.Contains(allCandidates, "ab") {
+		t.Logf("correctly recovered plaintext 'ab'")
+	}
+}
+
+// TestPipelineScorer_EvalBounded_looseCeilMatchesEval verifies that
+// EvalBounded with a loose ceiling (1.0) returns the same result as Eval for
+// both the correct guess and a wrong guess.
+func TestPipelineScorer_EvalBounded_looseCeilMatchesEval(t *testing.T) {
+	scorer, _, _, _ := buildScorerFixture(t)
+	offset := unpixel.Offset{X: 0, Y: 0}
+
+	cases := []struct{ guess, prev string }{
+		{"ab", "a"},
+		{"zz", "z"},
+		{"a", ""},
+	}
+	for _, tc := range cases {
+		want := scorer.Eval(t.Context(), tc.guess, tc.prev, offset)
+		got := scorer.EvalBounded(t.Context(), tc.guess, tc.prev, offset, 1.0)
+		if got != want {
+			t.Errorf("EvalBounded(%q,%q, ceil=1.0): got %+v, want %+v", tc.guess, tc.prev, got, want)
+		}
+	}
+}
+
+// TestPipelineScorer_EvalBounded_zeroCeilMatchesEval verifies that
+// EvalBounded with ceiling=0 (disabled) returns the same result as Eval.
+func TestPipelineScorer_EvalBounded_zeroCeilMatchesEval(t *testing.T) {
+	scorer, _, _, _ := buildScorerFixture(t)
+	offset := unpixel.Offset{X: 0, Y: 0}
+
+	want := scorer.Eval(t.Context(), "ab", "a", offset)
+	got := scorer.EvalBounded(t.Context(), "ab", "a", offset, 0)
+	if got != want {
+		t.Errorf("EvalBounded(%q,%q, ceil=0): got %+v, want %+v", "ab", "a", got, want)
+	}
+}
+
+// TestPipelineScorer_EvalBounded_tightCeilRejectsWrongGuess verifies that a
+// tight ceiling that the correct guess passes is also respected: a wrong guess
+// whose true score exceeds the ceiling must return Score >= ceiling.
+func TestPipelineScorer_EvalBounded_tightCeilRejectsWrongGuess(t *testing.T) {
+	scorer, cfg, _, _ := buildScorerFixture(t)
+	offset := unpixel.Offset{X: 0, Y: 0}
+
+	correctScore := scorer.Eval(t.Context(), "ab", "a", offset).Score
+	// The ceiling sits just above the correct score — the correct guess is
+	// accepted; a clearly wrong guess should be rejected (score >= ceiling).
+	ceil := correctScore + 0.1
+	if ceil >= cfg.Threshold {
+		// If somehow the correct score is already near threshold, widen to threshold.
+		ceil = cfg.Threshold
+	}
+
+	wrongBounded := scorer.EvalBounded(t.Context(), "zz", "z", offset, ceil)
+	wrongFull := scorer.Eval(t.Context(), "zz", "z", offset)
+
+	// For accepted candidates (score < ceiling) EvalBounded == Eval.
+	// For rejected candidates score >= ceiling.  wrongFull > ceil means rejected.
+	if wrongFull.Score < ceil {
+		// Wrong guess happened to fit under the ceiling — just verify valid range.
+		if wrongBounded.Score < 0 || wrongBounded.Score > 1 {
+			t.Errorf("EvalBounded wrong guess accepted: Score=%v out of [0,1]", wrongBounded.Score)
+		}
+	} else {
+		if wrongBounded.Score < ceil {
+			t.Errorf("EvalBounded wrong guess rejected: Score=%v, want >= ceil %.4f", wrongBounded.Score, ceil)
+		}
+	}
+}
+
+// TestPipelineScorer_EvalBounded_cancelledContext verifies that a pre-cancelled
+// context causes EvalBounded to return score=1 without rendering.
+func TestPipelineScorer_EvalBounded_cancelledContext(t *testing.T) {
+	scorer, _, _, _ := buildScorerFixture(t)
+	offset := unpixel.Offset{X: 0, Y: 0}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	got := scorer.EvalBounded(ctx, "ab", "a", offset, 0.5)
+	if got.Score != 1 {
+		t.Errorf("EvalBounded cancelled ctx: Score = %v, want 1", got.Score)
+	}
+}

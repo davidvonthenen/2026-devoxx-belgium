@@ -1,0 +1,10 @@
+
+# inspect image
+#ruoruo.jpg
+
+# adds blur to image
+python deepmosaic.py --media_path ./ruoruo.jpg --model_path ./pretrained_models/mosaic/add_face.pth --gpu_id 0
+
+# removes blur from image
+python deepmosaic.py --media_path ./result/ruoruo_add.jpg --model_path ./pretrained_models/mosaic/clean_face_HD.pth --gpu_id 0
+

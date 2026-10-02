@@ -1,0 +1,2 @@
+sample_id,source_line,text,before_path,after_path,width,height,blur_radius
+00000001,1,"this is a test, david",before/00000001.png,after/00000001.png,512,64,8.0

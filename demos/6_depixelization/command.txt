@@ -1,0 +1,14 @@
+
+OS Support:
+-rw-r--r--  1 vonthd  staff   206K Aug 29 12:22 debruin_sublime_Linux_small.png
+-rw-r--r--  1 vonthd  staff   101K Aug 29 12:22 debruinseq_notepad_Windows10_close.png
+-rw-r--r--@ 1 vonthd  staff   248K Aug 29 12:22 debruinseq_notepad_Windows10_closeAndSpaced.png
+-rw-r--r--@ 1 vonthd  staff   130K Aug 29 12:22 debruinseq_notepad_Windows10_spaced.png
+-rw-r--r--  1 vonthd  staff    88K Aug 29 12:22 debruinseq_notepad_Windows7_close.png
+-rw-r--r--  1 vonthd  staff   3.8K Aug 29 12:22 debruinseq.txt
+
+# View Input images
+input.png
+
+# depixelate
+python3 depix.py -p images/testimages/testimage3_pixels.png -s images/searchimages/debruinseq_notepad_Windows10_closeAndSpaced.png -o output.png
