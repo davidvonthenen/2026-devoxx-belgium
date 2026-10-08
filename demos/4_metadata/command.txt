@@ -1,0 +1,180 @@
+The secret passphrase is **`Incremental Updates`**. That solution is also confirmed in `explainer1.pdf`. :chatgpt-content-reference{index="0"}
+
+One important distinction: this puzzle hides the message in an **earlier version of a PDF content stream**, not in conventional metadata such as Author or Title. The author appended a replacement version of object `5` containing the `XXXXX` text, but left the original version in the file. **Recovering that earlier revision is the essential step before extracting the secret with `qpdf`.** :chatgpt-content-reference{index="1"}
+
+## 1. Start with the original puzzle file
+
+The commands below assume a macOS or Linux terminal, with `qpdf` installed, and the source file named `pdf-puzzle.pdf`. Your uploaded copy is named `pdf-puzzle(2).pdf`; substitute that quoted filename where necessary.
+
+Confirm that `qpdf` is available:
+
+```bash
+qpdf --version
+```
+
+Keep the original file unchanged throughout the walkthrough. The recovered revision will be written to a separate file.
+
+## 2. Identify the page’s content stream
+
+Run:
+
+```bash
+qpdf --show-pages pdf-puzzle.pdf
+```
+
+`--show-pages` identifies each page’s PDF object and its associated content streams. :chatgpt-content-reference{index="2"}
+
+For this puzzle, look for:
+
+```text
+page 1: 4 0 R
+  content:
+    5 0 R
+```
+
+This identifies **object `5`, generation `0`** as the page’s content stream. Inspect its dictionary:
+
+```bash
+qpdf --show-object=5,0 pdf-puzzle.pdf
+```
+
+The relevant dictionary is:
+
+```text
+<< /Filter /ASCII85Decode /Length 89 >>
+```
+
+The key clue is **`/Filter /ASCII85Decode`**. It identifies the stream as ASCII85-encoded—the same encoding described in the explainers. :chatgpt-content-reference{index="3"}
+
+However, the file contains two versions of this object. A normal lookup selects the updated version, not the original message. The explanation in `explainer2.pdf` describes how the reader ignores an original object when an updated version exists. :chatgpt-content-reference{index="4"}
+
+## 3. Find the reference to the earlier revision
+
+Inspect the PDF’s trailer:
+
+```bash
+qpdf --show-object=trailer pdf-puzzle.pdf
+```
+
+For your file, the relevant entries are:
+
+```text
+<< /Prev 718 /Root 1 0 R /Size 7 >>
+```
+
+**`/Prev 718`** points to the previous cross-reference table at byte offset `718`. The annotated screenshot on page 3 of `explainer2.pdf` shows this entry in the updated trailer, below the original revision’s `%%EOF` marker. :chatgpt-content-reference{index="5"}
+
+This is the puzzle’s underlying mechanism: an incremental update appends changed content while leaving the original content intact. :chatgpt-content-reference{index="6"}
+
+## 4. Recover the original revision
+
+The supplied solution says to retain everything through the **first `%%EOF` marker** and remove the appended update. Do this into a **new file**, leaving the puzzle untouched: :chatgpt-content-reference{index="7"}
+
+```bash
+LC_ALL=C sed '/%%EOF/q' pdf-puzzle.pdf > pdf-puzzle-original.pdf
+```
+
+This command copies the file through the first line containing `%%EOF`, then stops.
+
+**This shortcut is appropriate for this particular puzzle.** The author deliberately created an ASCII-only PDF to make text-editor inspection possible. It should not be treated as a general revision-recovery algorithm for arbitrary PDFs. :chatgpt-content-reference{index="8"}
+
+You now have:
+
+```text
+pdf-puzzle.pdf           Original puzzle, including the appended update
+pdf-puzzle-original.pdf  Recovered earlier revision
+```
+
+## 5. Extract the earlier object’s ASCII85 payload using qpdf
+
+Run the following against the **recovered file**, not the original puzzle:
+
+```bash
+qpdf --show-object=5,0 --raw-stream-data pdf-puzzle-original.pdf
+printf '\n'
+```
+
+`--raw-stream-data` outputs the stream’s stored bytes without decoding them. This preserves the ASCII85 text for the website demonstration. :chatgpt-content-reference{index="9"}
+
+The payload in your uploaded file is:
+
+```text
+6<#'\7PQ#@1a#b0+>GQ(+?(u.+B2ko-rakk+E1b1F)Yf5@<6!&BlbCgDI[]uD.RU,@;I&dE+EC!ATK:C<,*OE;u~>
+```
+
+This matches the original stream reproduced in `explainer1.pdf`. :chatgpt-content-reference{index="10"}
+
+To save it instead of printing it:
+
+```bash
+qpdf --show-object=5,0 --raw-stream-data pdf-puzzle-original.pdf \
+  > secret-message.ascii85
+```
+
+## 6. Decode the payload in Cryptii
+
+Open the [Cryptii ASCII85 page](https://cryptii.com/pipes/ascii85-encoding/), which provides ASCII85 encoding and decoding. :chatgpt-content-reference{index="11"}
+
+Configure the conversion for **ASCII85 decoding**, rather than encoding, and display the result as **text**.
+
+For the input, use the payload below, with the trailing PDF end marker `~>` removed. Copy the punctuation and backslash exactly as shown; do not include PDF dictionary entries or the words `stream` and `endstream`.
+
+```text
+6<#'\7PQ#@1a#b0+>GQ(+?(u.+B2ko-rakk+E1b1F)Yf5@<6!&BlbCgDI[]uD.RU,@;I&dE+EC!ATK:C<,*OE;u
+```
+
+The expected decoded text is:
+
+```text
+BT /F1 24 Tf 100 700 Td (The passphrase is Incremental Updates) Tj ET
+```
+
+Within that output, the recovered sentence is:
+
+```text
+The passphrase is Incremental Updates
+```
+
+Therefore, the secret value replacing the Xs is:
+
+```text
+Incremental Updates
+```
+
+This is the original sentence identified by the puzzle’s author. :chatgpt-content-reference{index="12"}
+
+## 7. Independently verify with qpdf
+
+For a local check without the website, replace `--raw-stream-data` with `--filtered-stream-data`. This asks `qpdf` to decode the stream’s filters. :chatgpt-content-reference{index="13"}
+
+Run it against both revisions:
+
+```bash
+# Updated revision: contains the Xs.
+qpdf --show-object=5,0 --filtered-stream-data pdf-puzzle.pdf
+printf '\n'
+
+# Earlier revision: contains the secret.
+qpdf --show-object=5,0 --filtered-stream-data pdf-puzzle-original.pdf
+printf '\n'
+```
+
+The respective decoded streams are:
+
+```text
+BT /F1 24 Tf 100 700 Td (The passphrase is XXXXXXXXXXXXXXXXXXX) Tj ET
+```
+
+```text
+BT /F1 24 Tf 100 700 Td (The passphrase is Incremental Updates) Tj ET
+```
+
+**If you still get Xs, check the input filename:** the secret-bearing stream is in the recovered earlier revision. The appended version of object `5` contains the replacement text. :chatgpt-content-reference{index="14"}
+
+Also avoid starting with a `qpdf --qdf` rewrite or another save operation. A rewritten PDF is not a byte-for-byte preservation of the original file and its history. Perform the revision recovery on the untouched source first. :chatgpt-content-reference{index="15"}
+
+---
+
+**Verification:** I decoded both streams directly from your uploaded file, tested the `sed` extraction, and rendered the recovered PDF to confirm the visible message. `qpdf` was unavailable in this environment, so its commands above were checked against the official documentation rather than executed locally.
+
+:chatgpt-content-reference{index="17"}[Download the recovered original revision](sandbox:/mnt/data/pdf-puzzle-original.pdf)

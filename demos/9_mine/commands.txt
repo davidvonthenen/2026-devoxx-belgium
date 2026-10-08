@@ -1,0 +1,13 @@
+
+# to train
+python train.py
+
+# to predict using (radius=8)
+# input: david-test-v2.png
+python predict.py --image ./david-test-v2.png
+
+
+# to predict using (radius=5)
+# input: david-test-v1.png
+python predict-v1.py --image ./david-test-v1.png
+

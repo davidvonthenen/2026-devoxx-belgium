@@ -1,0 +1,345 @@
+# Wall-breakers v2 — programme d'exécution (2026-07-04)
+
+Issu de la revue exhaustive « comment j'aurais fait » (21 points). Objectif unique :
+**décodage performant — casser les murs real / wild / sick / context**, en autonomie,
+en respectant les règles absolues (no-CGO par défaut, benchstat sur tout changement perf,
+gate `/simplify` + revues, caged `go test`, pas de régression panel 17/17 ni journal full-set).
+
+## Thèse stratégique
+
+Deux corpora résolus (fixtures 17/17, blur 13/14), quatre murés à ~0 exact-match. Chaque
+mur coïncide avec un endroit où l'état de l'art emploie un composant **appris** — que le
+projet a interdit (tous les `//go:build ml` sont des stubs vides). 14 décodeurs livrés,
+aucun n'a franchi exact-match sur real/wild/sick. Les gains restants sont dans :
+(a) exécuter les expériences flaguées-jamais-lancées, (b) élargir l'espace de polices,
+(c) franchir la frontière ML-**sidecar**, (d) consolider pour itérer vite.
+
+Causes-racines mesurées (table `Évolution`) :
+- **real** 0/3 — mauvaise police (conf 1.0, faux avec assurance) → espace de polices trop petit (9).
+- **wild** 0/5 — échec géométrique amont (grille/offset/crop) → jamais isolé.
+- **sick** 1/10 — mauvaise longueur (frontières proportionnelles) → segmentation.
+- **context** 0/10 — destruction d'information (mosaïque moyenne-de-bloc) → prior sémantique.
+
+## Séquencement par ROI
+
+### Phase 1 — Diagnostic + gains gratuits (parallélisable, pur-Go, faible risque)
+- **P2** Harnais d'isolation géométrique wild/real : mesurer par étage (localise→grille→police)
+  *où* wild échoue avant tout décodage. **Keystone** — conditionne P3/P4/P5. Livrable :
+  `mise run geomeasure` + `docs/GEOMETRY.md`. Critère : chiffres par-étage par-image.
+- **P9** PGO : `default.pgo` depuis une récup représentative, benchstat ~4,5 %, zéro régression.
+- **P17/P18** Diagnostic par-étage + taxonomie d'échec structurée (adossé à P2 et au journal).
+
+### Phase 2 — Casser real (le plus rentable sous no-CGO)
+- **P3+P12+P15** Élargir l'espace d'hypothèses de polices (centaines de familles libres) +
+  pré-filtre `fontrank` (fingerprint glyphe) / LSH pour rester tractable. Benchstat le
+  prefilter ; mesurer le gain de récup sur real. Critère : ≥1 exact-match real OU diagnostic
+  clair que la police vraie reste hors atteinte (→ P4).
+
+### Phase 3 — Casser sick + valider la thèse sémantique
+- **P1** Spike LLM-propose/vérifie sur sick+context (mesure décisive, pas un build).
+- **P5** Segmentation+décodage joints (char-LM dans le trellis / CTC contraint largeur) pour
+  la frontière proportionnelle de sick.
+- **P6** Fixture sample-starved (IBAN, bloc ≥ largeur glyphe) + multi-frame super-résolution
+  de bout en bout — fermer le négatif sous-testé.
+
+### Phase 4 — Franchir la frontière ML-sidecar (plafond real/wild)
+- **P4+P14** Remplir un seam `//go:build ml` avec un vrai petit CNN font-ID entraîné sur le
+  domaine render→pixelise (forward-pass pur-Go OU sidecar hors-processus documenté).
+- **P7+P8** Restaurateur de flou externe via la porte `VerifyImage` (régime flou = vrai gain
+  SOTA) ; OCR-auto du leak-prepass (caviardage partiel).
+
+### Phase 5 — Perf sans-perte + architecture + produit
+- **P10** Branch-and-bound à borne admissible (pruning exact, sans changer le décodage).
+- **P11** Métrique honnête *time-to-first-correct* (remplace le budget-timeout du journal).
+- **P16** Métrique edge-aware/apprise opt-in derrière l'interface `Metric` — mesurer le rappel.
+- **P13** Consolider did/trained-hmm/window-hmm/reference/ensemble en un décodeur block-grid
+  unifié à emissions/priors pluggables.
+- **P19/P20/P21** Operating-envelope comme contrat produit ; réallouer le budget hors
+  fixtures/blur/hot-path ; étendre le gate anti-régression aux ~75 images.
+
+## Journal des findings (exécution)
+
+### P2 / P2b — grille (livré, commits 3b029e2, 9e0c2e9)
+Le harnais `geomeasure` a **corrigé l'hypothèse de départ** : real ne casse pas d'abord à la
+police mais à la **grille** (marx : `InferBlockGrid` → Size=0 sur bloc 19px proportionnel à
+offset (5,5)). Fix livré (garde sous-harmonique + phase non-nulle) → marx passe grille→police,
+panel 17/17 byte-identique, et **2 tests mono-digits pré-existants réparés** (window-hmm timeout
+300s, trained-hmm ErrNoContent). Wild n'est PAS un échec de localisation.
+
+### P3a — pourquoi `real/hello-world.png` échoue en aveugle (root-cause, investigation)
+Image la plus tractable (« Hello World ! », 13 glyphes monospace) : géométrie+police saines, le
+**modèle direct** la reproduit à pixelmatch 0.0000, mais zéro/best-config ne l'atteint pas. **5
+bloqueurs cumulés** identifiés (aucun résoluble par plus de recherche — l'élagage tue avant la
+profondeur 1) :
+1. **Pas de crop du contenu** — marges blanches → score trivial 0.0 à x=0, `DiscoverOffsets`
+   laisse tout passer, le DFS cherche du bruit.
+2. **Police par défaut fausse** — Liberation Sans ≠ Noto Sans Mono (formes de bols divergentes).
+3. **Mode de pixelisation** — GEGL moyenne en **lumière linéaire**, le défaut moyenne en gamma.
+4. **XScale 1.06 non modélisé** — GIMP a appliqué ~6 % d'étirement horizontal *au niveau pixel*
+   avant mosaïque ; `LetterSpacing` ajoute de l'espace inter-glyphe mais **ne redistribue pas
+   l'encre intra-glyphe** → le score du 'H' (~0.375) dépasse le seuil (0.25), DFS élague tout.
+   **C'est la primitive réellement manquante** du modèle direct (aucun des 14 décodeurs ne
+   modélise l'anisotropie), et le vrai levier pour atteindre le 0.0000 en aveugle.
+5. **PaddingLeft** — mauvaise phase d'encre dans le bloc 0.
+
+Conséquence : hello-world blind exige (a) la capacité `Style.XScale` (anisotropie) + (b) le
+câblage best-config (crop/police/linéaire/padding auto). Prochaine action contrôlée : lander
+`Style.XScale` proprement (gated byte-identique sur zéro-value, benchstat, test oracle prouvant
+que le modèle direct atteint l'image), séparé du câblage auto-calibration (futur, via l'axe
+varfont existant). Un premier essai a churné le hot-path sans vérification → **jeté** ; ré-abordé
+en pass minimale vérifiée.
+
+### P3b — décodage blind de hello-world (déféré, statut honnête)
+Le modèle direct est **vérifié** : `TestRealMosaic_HelloWorld` (linear=0.0000, sRGB=0.2986)
+et `TestXScale_HelloWorld_directModel` (XScale=1.06 → 0.0000, XScale=1.0 → 0.0972) passent
+réellement — le modèle reproduit la redaction ET **discrimine** (bonne config=0, mauvais
+stretch=0.097). Donc le décodage blind n'est **pas** un mur fondamental : c'est un problème de
+**câblage best-config** (linéaire + Noto Sans Mono + XScale=1.06 + crop correct) + **convergence
+de recherche**, pas un mismatch de modèle.
+
+⚠️ **Faux finding écarté** : une sonde a conclu à un « mur de style de renderer » (encre
+x/image sombre R≈50 vs GIMP claire R≈200 empêchant tout match). C'est **contredit** par l'oracle
+qui atteint 0.0000 avec exactement le même `defaults.RendererFromFonts` — la sonde utilisait un
+wrapper `inkAlignRenderer` biaisé. Conclusion et fichiers de sonde jetés (non committés).
+
+Reste à faire (P3b, non churné) : câbler {LinearBlockAverage, Noto Sans Mono, XScale, autoCrop}
+dans le best-config du corpus real (le best-config a le droit d'utiliser les hints du manifeste
+— c'est la borne-haute atteignable) et vérifier que le DFS/monospace converge sur les 13 glyphes.
+Cible : premier exact-match real. À faire en une passe contrôlée dédiée (pas d'exploration
+tentaculaire du hot path).
+
+**Mesure directe (un test moteur ciblé, non committé) :** avec la config oracle
+(`Recover` + notoMonoRenderer + LinearBlockAverage(32) + Style{FontSize:124, XScale:1.06} +
+MonospaceStrategy + CharsetASCII), le moteur décode **"H"** (cellule 0 correcte : anisotropie +
+police + linéaire + crop bons) puis s'arrête. Loosening le seuil ne débloque pas : `th=0.35` →
+`"O,U"` (total 0.6354, garbage), seuils ≥0.5 → explosion combinatoire (timeout 8 min). Donc la
+convergence exige un travail **coordonné** (crop de bande + segmentation en 13 cellules +
+avance-cellule cohérente avec XScale + seuil), pas un réglage à un bouton. Confirmé : P3b est un
+effort dédié, pas un quick-win. Le modèle direct atteignant 0.0000, la limite est bien la
+**recherche/segmentation**, pas le modèle.
+
+### P3b — attaque du mur, progrès vérifié (commit a22ad87)
+Diagnostic instrumenté (scores par-cellule mesurés) : le blocage n'était **ni le seuil ni le
+scorer marginal** mais la **sélection d'offset**. `DiscoverOffsets` scorait chaque origine par
+`min sur charset du score mono-caractère` ; un glyphe **blanc** (espace) matche n'importe quelle
+zone blanche → score ≈0 à *toutes* les origines, donc sur une image à marges blanches (captures
+réelles) toutes les origines s'égalisent à 0 et la vraie phase est noyée (hello-world : offset
+trouvé (31,15) au lieu de (0,0)). **Fix livré, vérifié, gratuit** : exclure les runes
+`unicode.IsSpace` du probe (seuls les glyphes encrés portent l'info de phase) — panel 17/17,
+matrix inchangée, benchstat neutre, test unitaire. Effet : le 'H' vérité passe 0.4286 → 0.3333.
+
+**Résidu isolé (prochain pas précis)** : hello-world donne encore "H". La cause résiduelle est
+que le score mono-caractère est comparé contre **toute la bande de 13 glyphes** — un glyphe seul
+ne matche jamais une ligne multi-caractères (H=0.33 > seuil 0.25), donc la vraie origine ne
+survit pas et la cellule 0 n'est pas admise. Le prochain pas est un **scoring borné à la cellule**
+(comparer chaque cellule contre sa seule région de bloc, pas l'image entière) + phase exacte.
+C'est un effort coordonné dédié, pas un bouton — mais le chemin est maintenant précisément cartographié
+et le mur « real = modèle » est réfuté : c'est un mur de **recherche/segmentation**, réparable en pur-Go.
+
+### P3b — diagnostic complet du mur (le chemin exact, mesuré)
+Après le fix de sélection d'offset, le résidu a été entièrement caractérisé (probe de seuils :
+loosening → explosion combinatoire, pas de convergence). **Cause structurelle finale** : avec
+`XScale=1.06`, l'**avance de glyphe** (dérivée de la police 124px étirée) est **incommensurable**
+avec la **grille de blocs 32px**. Le modèle direct atteint 0.0000 en *glissant l'image entière*
+sur des sous-phases ; mais le scoring **marginal** par-cellule de la stratégie monospace, évalué
+à des offsets de bloc entiers, ne peut structurellement pas atteindre cet alignement (advance ≠
+block). Cell 0 "H" plafonne à ~0.33 même à la meilleure origine entière.
+
+**Conclusion (le chemin, précis) :** le premier exact-match real n'est PAS atteignable par le
+chemin monospace-marginal ; il faut un décodeur à **scoring image-entière** (le chemin
+`reference`/`refmatch` : matching par-phase de candidats complets, qui compare la bande entière
+comme le fait `bestDistance`). Câbler `DecodeReference`/refmatch avec la config calibrée
+(Noto Sans Mono + LinearBlockAverage + XScale + phase) est l'effort dédié qui casse ce mur —
+entièrement pur-Go, sans ML. Le mur « real = fidélité du modèle » est **définitivement réfuté** :
+le modèle atteint 0.0000, c'est un mur de **méthode de scoring de recherche**, cartographié de bout en bout.
+
+### P3b — CULMINATION : le premier réel est récupérable, mécanisme démontré ✅
+Test permanent `TestHelloWorld_RecoverableByProposeVerify` (passe). Chaîne complète, mesurée :
+- Décodage **par-caractère** (monospace/reference/+LM) = **info-affamé** à block=32 (glyphe ≈2-3
+  colonnes) → tous garbage (dist 0.017-0.026).
+- Scoring **chaîne-entière** avec alignement exhaustif (crop-encre + glissement position/phase,
+  comme le modèle direct) → confirme **"Hello World !" à 0.0000** : la redaction EST réversible.
+- MAIS **égalité sémantique** : "Hello Norld !" aussi à 0.0000 (W≈N en moyenne de bloc). Seul un
+  **prior de langue** sépare le mot réel du non-mot.
+
+**Conclusion démontrée** : le chemin récupérable = **proposeur génératif (LLM propose des mots
+plausibles) + vérif physique chaîne-entière (confirme ~0) + prior sémantique (départage les
+égalités)**. C'est exactement le différenciateur LLM-propose/vérifie (#3), **prouvé sur une image
+réelle**. « real = mismatch de modèle » définitivement réfuté.
+
+**Gap production concret (prochain pas le plus rentable)** : `unpixel.Verify`/`verifyCore` n'aligne
+que sur les offsets de grille-bloc (via `TotalScore`), PAS le crop-encre + glissement de position
+qu'utilise le modèle direct — donc aujourd'hui Verify score ~0.63 pour *tous* les candidats sur
+cette redaction plus large. **Donner à `verifyCore` cet alignement exhaustif fait fonctionner la
+boucle LLM-propose/vérifie sur les images réelles** (pas seulement hello-world) — le levier le plus
+élevé pour le différenciateur stratégique, entièrement pur-Go.
+
+### P1/P3b — PRODUCTION : la boucle propose/vérifie ferme sur une image réelle via MCP ✅
+
+Le différenciateur (LLM propose → vérif physique) était prouvé au niveau **bibliothèque**
+(`TestVerify_RealHelloWorld`, avec hints oracle passés à la main). Cette passe le rend
+**opérationnel via le serveur MCP** — un client LLM peut désormais piloter la récupération d'un
+caviardage RÉEL de bout en bout.
+
+**Mesure d'abord (scratch, jeté)** sur `real/hello-world.png`, matrice de configs :
+- **Sans crop**, toutes distances ~0.19–1.0 ; la vérité n'est **même pas la plus basse** (dilution
+  par les marges blanches) ET le chemin auto est intractable (>120–225 s, ne converge pas).
+- **Avec crop** sur la bande + config oracle (Noto Sans Mono + block=32 + `LinearBlockAverage` +
+  `Style{FontSize:124, XScale:1.06}`) : **vérité `"Hello World !"` = 0.0000, Match=true, en ~14 s**,
+  décoy `"HELLO WORLD !"` = 0.58 **rejeté**. Le **crop est le levier contraignant** (correctness
+  *et* coût d'alignement) — le chemin auto (colorspace/block/DFS) ne le remplace pas.
+
+**Tous les hints requis sont déjà découvrables par les outils MCP** : crop + block ←
+`unpixel_analyze` ; police ← `unpixel_rank_fonts` ; colorspace linéaire ← fingerprint analyze ;
+font_size / x_scale ← `unpixel_calibrate`. Le mur n'était **pas** la fidélité du modèle mais que
+`unpixel_verify_candidates` ne pouvait pas **accepter** ces hints.
+
+**Livré (commit à venir)** : `mcpserver.VerifyWithHints` (cœur testable) + schéma
+`unpixel_verify_candidates` étendu (`font` bundled / `font_path` / `font_base64`, `crop` [x,y,w,h],
+`linear_light`, `font_size`, `x_scale`, `letter_spacing`) + résolveur `bundledFontData`
+(case-insensitive sur `fonts.All`). Test permanent `TestVerifyWithHints_RealHelloWorld` (Pick =
+vérité 0.0000, décoy rejeté) + tests unitaires blancs des helpers. `VerifyCandidates` conservé
+(délègue à `VerifyWithHints` — rétro-compatible, 11 appelants inchangés). Panel 17/17 préservé,
+gates verts. **Le différenciateur LLM-propose/vérifie est opérationnel en production, pur-Go, sans ML.**
+
+**Généralisation livrée (revue /simplify, altitude) ✅** : le crop-bande a été remonté de la couche
+MCP dans la **bibliothèque** — option racine `unpixel.WithCrop(image.Rectangle)` honorée dans
+`prepareVerify` (crop + marge d'alignement juste après `ToRGBA`, avant deskew/colorspace). Inerte
+quand la bande est vide → byte-identique pour tout appelant existant (aucun ne la fixe). `VerifyWithHints`
+délègue désormais via `WithCrop` (plus de chirurgie d'image côté MCP ; `cropForVerify` supprimé).
+Bénéfice : **tout appelant `Verify` (CLI, bibliothèque, MCP) récupère un caviardage réel** en passant
+la bande. Prouvé au niveau bibliothèque par `TestVerify_WithCrop_RealHelloWorld` (image plein cadre
+non-croppée → vérité 0.0000, décoy rejeté) ; `TestVerify_RealHelloWorld` (crop manuel) et
+`TestVerifyWithHints_RealHelloWorld` (via MCP) inchangés à 0.0000.
+
+### Wild (Depix mosaïques) — diagnostic mesuré : mur de FIDÉLITÉ, pas de recherche
+
+Ayant rendu propose/vérifie + `WithCrop` opérationnel sur le réel, j'ai tenté le corpus `wild`
+mosaïque avec le MÊME playbook. Deux images ont une vérité *phrase* (`m4`/`m5` = « Hello from the
+other side », benchmark Depix Notepad/Sublime) — la forme exacte où propose/vérifie gagne.
+
+Géométrie (probe jeté) : ce sont de **minuscules snippets déjà croppés** (m4 205×15, m5 250×20,
+bloc≈5), pas de crop nécessaire. J'ai balayé m4 sur **9 polices bundled × {sRGB, linéaire} × {14,16,18,20}pt**
+via `unpixel.Verify`. **Résultat : 0 config discrimine ; meilleure distance-vérité = 0.6699**
+(JetBrains Mono, linéaire, 14pt) — et même pas le minimum (un décoy score plus bas).
+
+**Conclusion (actionnable)** : 0.67 (vs 0.0000 sur hello-world) n'est **pas** un mismatch de police
+marginal (~0.2–0.3) mais un **échec de fidélité du modèle direct** : le modèle ne reproduit pas
+l'image. Cause = (a) police Depix (Consolas/Lucida Console) hors bundle, ET (b) **AA sous-pixel
+ClearType** cuit dans la capture d'écran avant pixelisation — nos moyennes de bloc (rendu gris propre
+→ moyenne) ne peuvent pas matcher des moyennes de pixels ClearType colorés. C'est un mur **plus
+profond** que hello-world (capture GIMP grise propre) : il exige la police exacte + un modèle d'AA
+d'écran, ou le tier ML (calibration depuis le visible), **pas** plus de recherche/crop. Confirme et
+précise [[font-prior-vfr-mismatch]] et l'operating-envelope. Rien commité (probe jeté) ; findings ici.
+
+### Sick + context — MUR CASSÉ : alignement de phase sous-bloc pour petits blocs ✅
+
+En sondant les 2 échecs digits du spike P1 (`digits_8d`/`digits_9d`, vérité ~0.5 alors que
+`digits_7d`/`digits_10d` = 0.0000, **config identique** LibMono/bloc 8/32pt), j'ai trouvé un
+**vrai bug d'algorithme, réparable** : `alignedDist` (le fallback d'alignement exhaustif de
+`verifyCore`) utilisait `const alignPhaseStep = 8`. À bloc=8, la boucle de phase
+`for px := 0; px < block; px += 8` ne teste **que la phase 0** — aucun alignement sous-bloc.
+7d/10d s'alignaient par chance sur la phase 0 ; 8d/9d avaient besoin d'une phase sous-bloc jamais
+essayée → 0.5.
+
+**Fix** : `alignPhaseStep(block) = max(1, block/4)` — ~4 échantillons de phase par axe pour tout
+bloc. **Byte-identique à bloc=32** (step 8 → phases 0,8,16,24, comme avant et comme la sonde
+`bestDistance`) ; les petits blocs obtiennent enfin une couverture de phase réelle (bloc=8 → step 2).
+
+**Mesuré (`mise run verifymeasure`, autorité)** — gain strict, **zéro régression** (chaque image
+gagnante le reste ; aucun décoy ne matche à tort, tous les échecs restants = vérité pas rang-1) :
+- **sick 8/10 → 10/10** : `digits_8d` 0.5188→**0.0771** (rang 1, marge +0.0028), `digits_9d`
+  0.4740→**0.0925** (rang 1, marge +0.0024).
+- **context 2/9 → 5/9** (bonus) : `ctx_sameline_user` 0.4556→0.0153, `ctx_label_password`
+  0.5238→0.0119, `ctx_crossimg_wght700` 0.4649→0.0636 — tous nouveaux rang-1.
+- Total discrimination propose/vérifie **10/19 → 15/19** sur sick+context.
+
+Portée : `alignedDist` n'est appelé QUE par `verifyCore` (chemin Verify) — le chemin décode/Recover
+ne le touche pas, donc **panel 17/17 inaffecté par construction**. Coût : le fallback alignedDist
+fait plus d'itérations de phase à bloc≤16 (bloc=8 : ×16 sur la boucle de phase), payé seulement
+quand le chemin pipeline manque ; hot-path Recover intact. Real hello-world (bloc 32) inchangé.
+
+### Alignement position coarse-to-fine — MUR CASSÉ à coût quasi-nul ✅
+
+Le glissement de position d'`alignedDist` (`alignPosStep=4`) manquait les optima sur offset
+sous-grille (comme le fix de phase, mais pour la position). Un `alignPosStep=2` global récupérait
+`ctx_sameline_block10` « r00t » (0.0714→0.0000) mais **triplait** la latence verify (positions
+289→1089 par candidat : hello-world 8 s→26 s). Retenu à la place : **recherche coarse-to-fine**
+(`minPositionDist`) — balayage grossier au pas 4, puis raffinement pixel-par-pixel dans une fenêtre
+±3 autour de l'optimum grossier. **Précision sous-pixel au coût ≈ balayage grossier** (289+49 vs
+1089 sondes/phase).
+
+**Mesuré** : `verifymeasure` **context 5/9 → 6/9** (r00t 0.0000 rang-1, gain strict, zéro régression,
+sick 10/10 conservé) ET hello-world verify **8.6 s** (vs 26 s en step-2 global — la latence step-4 est
+préservée). Le meilleur des deux : +1 récup ET pas de taxe perf. Gardé par
+`TestMinPositionDist_RefinesOddOffset` (prouve que le raffinement atteint un optimum hors-grille).
+Technique standard (pyramide/coarse-to-fine) appliquée à l'alignement — amélioration sur le
+balayage-grille brute-force.
+
+### Nunito variable-font — diagnostic : le mur n'est PAS la police mais les homoglyphes
+
+Les 2-3 images context `var_font` (Nunito wght 600/700/750) échouaient parce que le harnais
+verifymeasure retombait sur Liberation Sans (mauvaise police). La capacité de rendu VF **existe**
+(`internal/varfont.VarRenderer` + `NunitoVFWght` embarqué, stack pure-Go go-text). Testé (sonde
+jetée) : `unpixel.Verify` avec `VarRenderer(Nunito, wght=N)` **rend correctement** et fait plonger
+la distance-vérité :
+- `ctx_varfont_wght600` « Tr0ub4dor » : 0.0535 rang-3 → **0.0067 rang-1 (WIN)**.
+- `ctx_varfont_wght750` « G4te2024 » : 0.5123 → **0.0158** (mais rang-2, marge −0.0018).
+- `ctx_crossimg_wght700` « Secret7 » : 0.0636 → **0.0132** (rang-2, marge −0.0022 ; son ancien
+  « win » à 0.0636 était un **artefact de mauvaise-police** — Liberation Sans par chance).
+
+**Conclusion (actionnable, wiring reverté)** : la bonne police VF **comprime toutes les distances
+vers ~0.01**, transformant l'échec de-police en **quasi-égalité homoglyphe** (décoys à swap de glyphe
+confus O/0, l/1 gagnent de ~0.002). Sous scoring physique pur, câbler la VF est **neutre en compte**
+(+wght600 gagné, −crossimg700 son faux-win exposé) → non retenu. Le mur Nunito résiduel est donc la
+**tie sémantique/homoglyphe**, franchissable par un **prior de langue (rerank)** sur ces secrets
+leetspeak (mots manglés Tr0ub4dor/G4te2024/Secret7), **pas** par la fidélité de police (déjà résolue).
+Levier suivant : VF renderer + rerank>0 dans la boucle verify. Cf. [[font-prior-vfr-mismatch]],
+[[blind-sentence-scoring-wall]].
+
+**VF + rerank testé (sonde jetée) — le prior est un départageur INCOHÉRENT.** Avec le VarRenderer +
+`rerank(English, w)` sur les décoys durs : à faible poids (w≈0.05) le prior fait gagner `wght750`
+(« G4te2024 » rang 2→1) et `crossimg700` (« Secret7 » rang 2→1) — leurs décoys sont plus riches en
+chiffres. MAIS il **rétrograde** `wght600` (« Tr0ub4dor » rang 1→2) : la vérité elle-même est
+peu-anglaise (troubadour manglé), donc le prior classe un décoy au-dessus. Aucune config (VF, poids)
+unique ne gagne les trois : le prior aide quand la vérité est plus mot-like que son décoy, nuit sinon.
+**Conclusion définitive** : le mur résiduel (Nunito + `mono_token` hex + wild) est une **limite
+info-théorique** — à rendu correct, les secrets haute-entropie deviennent des égalités homoglyphes
+physiques qu'un prior de langue global départage de façon incohérente. Il faut des **émissions
+apprises par-caractère** (HMM entraîné / ML, //go:build ml) qui modélisent la confusabilité
+per-glyphe conditionnée sur l'image — pas un prior de langue global. C'est le plafond ML documenté.
+
+## État du programme (2026-07-05)
+
+Livré et committé (branche `wall-breakers-v2`), tous gates verts, panel 17/17 préservé :
+
+| # | Point | Statut | Commit |
+|---|-------|--------|--------|
+| P2 | Harnais d'isolation géométrique | ✅ livré | `3b029e2` |
+| P2b | Robustesse détection grille (marx + sous-harmonique) | ✅ livré (+2 tests réparés) | `9e0c2e9` |
+| P3a | Primitive anisotropie `Style.XScale` | ✅ livré, vérifié 0.0000 | `2a45144` |
+| P3b | Décodage blind hello-world | 🔬 modèle direct prouvé ; blind = câblage/recherche (déféré) | `384213d` (doc) |
+| P1/P3b | Boucle propose/vérifie réelle **via MCP** (`VerifyWithHints` + schéma étendu) | ✅ livré, `TestVerifyWithHints_RealHelloWorld` (0.0000, décoy rejeté) | commit à venir |
+| P21 | Anti-régression full-testdata | ⚠️ gap : journal couvre 5-6/10 corpora ; `perspective` non gaté |
+| P1,P4,P5,P6,P7,P8,P9,P10-P20 | — | ⏳ non commencés (échelle recherche pour la plupart) |
+
+Enseignements clés de l'exécution :
+1. **Mesurer d'abord paie** : le diagnostic P2 a corrigé l'hypothèse (real casse à la grille,
+   pas d'abord la police), débloquant un fix qui a aussi réparé 2 tests cassés.
+2. **Ne jamais commiter du churn non vérifié** : 2 tentatives d'agents ont churné le hot path
+   sans vérifier (panel/benchstat) et abouti à une conclusion fausse (« mur de renderer »
+   contredit par l'oracle 0.0000) → **jetées**. La discipline « vérifie ou rapporte » tient.
+3. **Le vrai plafond real reste la fidélité du modèle + la convergence de recherche**, pas la
+   géométrie (désormais saine sur marx). Les gains décisifs restants sont à l'échelle recherche
+   (ML-emissions entraînées, LLM-propose/vérifie, décodage joint proportionnel).
+
+Prochaines passes contrôlées recommandées (une par commit, vérifiées) : P3b (câbler best-config
+XScale/linear/font/crop + convergence), P6 (fixture sample-starved + super-résolution multi-frame),
+P9 (PGO borné), P21 (ajouter perspective/context au gate journal).
+
+## Règle transverse
+
+Chaque item : TDD → implémentation (go-dev/algo-architect) → benchstat (si perf) → doc →
+commit via les gates (`mise run ci`, `/simplify`, caged test). Aucun décodeur nouveau retenu
+s'il ne bouge que le *mean-similarity* : critère = franchir exact-match sur un corpus muré,
+OU produire un diagnostic actionnable. Pas de régression panel 17/17 ni journal full-set.

@@ -1,0 +1,13 @@
+
+# Scan current directory (where script is saved)
+python check_redaction.py
+
+# Scan specific directory
+python check_redaction.py --directory /path/to/pdfs
+python check_redaction.py --directory ./pdfs
+
+# Scan recursively
+python check_redaction.py --recursive
+
+# Scan specific directory recursively
+python check_redaction.py --directory /path/to/pdfs --recursive

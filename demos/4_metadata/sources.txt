@@ -1,0 +1,12 @@
+
+Source:
+https://didierstevens.com/files/data/pdf-puzzle.pdf
+
+Explainer:
+https://blog.didierstevens.com/2008/05/06/a-little-pdf-puzzle/ (explainer 1)
+https://blog.didierstevens.com/2008/05/07/solving-a-little-pdf-puzzle/ (explainer 2)
+https://github.com/qpdf/qpdf/issues/22
+
+
+tool:
+https://cryptii.com/pipes/ascii85-encoding/

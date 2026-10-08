@@ -1,0 +1,32 @@
+# Recovery quality history
+
+Per-version decode quality + speed over the fixture panel, appended by
+`mise run bench:panel:record`. Quality is the headline; absolute ms vary by
+machine, so compare the **deltas** between rows. Raw run: `quality-baseline.json`.
+
+| Date       | Version        | Exact        | MeanAcc | Fidelity | Total ms | Note                                                                                                                            |
+|------------|----------------|--------------|---------|----------|----------|---------------------------------------------------------------------------------------------------------------------------------|
+| 2026-06-19 | `v0.4.0`       | 14/14 (100%) | 1       | 1        | 1138     | panel introduced (baseline)                                                                                                     |
+| 2026-06-19 | `priors+pool`  | 17/17 (100%) | 1       | 1        | 1784     | P3.7 secrets + P3.2 dictionary priors; P4.8 pooling; +3 secret fixtures                                                         |
+| 2026-06-19 | `v0.5.0`       | 17/17 (100%) | 1       | 1        | 1450     | P3.10 deblur, P3.11 auto-TopK, P4.11 intra-node parallel, +2 code fonts                                                         |
+| 2026-06-21 | `v0.6.0`       | 17/17 (100%) | 1       | 1        | 1503     | P6 blind bilingual (FR/EN) recovery + mosaictext zero-config monospace decoder                                                  |
+| 2026-06-21 | `v0.7.0`       | 17/17 (100%) | 1       | 1        | 1505     | P7 input robustness: frequency-weighted FR prior + auto median denoise                                                          |
+| 2026-06-22 | `v0.8.0`       | 17/17 (100%) | 1       | 1        | 1495     | P7.3 zero-config blur recovery (RecoverBlurred: adaptive σ-search + LM-blended beam)                                            |
+| 2026-06-22 | `perf-aa-skip` | 17/17 (100%) | 1       | 1        | 919      | mosaic AA-skip metric + auto-select in Wire                                                                                     |
+| 2026-06-22 | `v0.8.1`       | 17/17 (100%) | 1       | 1        | 929      | perf: mosaic AA-skip metric + scorer stage caches (~35% faster, bit-identical)                                                  |
+| 2026-06-22 | `v0.8.2`       | 17/17 (100%) | 1       | 1        | 949      | ergonomics/perf: RecoverBlurred file/reader helpers, denoise sentinels, beam nil-LM fast path; pre-commit review gate hardening |
+| 2026-06-22 | `P-D`          | 17/17 (100%) | 1       | 1        | 920      |                                                                                                                                 |
+| 2026-06-22 | `P-A` | 17/17 (100%) | 1 | 1 | 950 |  |
+| 2026-06-22 | `P-C` | 17/17 (100%) | 1 | 1 | 923 |  |
+| 2026-06-22 | `P-B` | 17/17 (100%) | 1 | 1 | 929 |  |
+| 2026-06-22 | `v0.9.0` | 17/17 (100%) | 1 | 1 | 911 |  |
+| 2026-06-23 | `v0.10.0` | 17/17 (100%) | 1 | 1 | 929 |  |
+| 2026-06-23 | `v0.11.0` | 17/17 (100%) | 1 | 1 | 1008 |  |
+| 2026-06-24 | `v0.12.0` | 17/17 (100%) | 1 | 1 | 946 |  |
+| 2026-06-24 | `v0.13.0` | 17/17 (100%) | 1 | 1 | 744 |  |
+| 2026-06-25 | `v0.14.0` | 17/17 (100%) | 1 | 1 | 1422 |  |
+| 2026-06-26 | `v0.15.0` | 17/17 (100%) | 1 | 1 | 1745 | opt-in real-world: auto crop/colorspace/calibrate + prefix constraint |
+| 2026-06-26 | `v0.16.0` | 17/17 (100%) | 1 | 1 | 2045 | opt-in ensemble + multi-frame + context-aware DID + glyph fingerprint + opsz/slnt |
+| 2026-06-26 | `v0.17.0` | 17/17 (100%) | 1 | 1 | 765 | MCP server (LLM toolbox) + calibrated verify_candidates + trend-check gate |
+| 2026-06-30 | `v0.17.0+prog` | 17/17 (100%) | 1 | 1 | 743 | program #1–#8 (leak/operator-zoo/trained-hmm/Verify, checksum-trellis, font-prior, rerank, image-verify-gate, infoleak) — all opt-in/additive, default path byte-identical so the panel is unchanged |
+| 2026-06-30 | `410f801` | 17/17 (100%) | 1 | 1 | 1719 |  |

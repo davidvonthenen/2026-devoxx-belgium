@@ -1,0 +1,19 @@
+
+Source:
+https://web.archive.org/web/20260131153148/https://www.justice.gov/epstein/files/DataSet%209/EFTA00400459.pdf
+https://archive.org/download/efta-00400459-lossless-webp
+
+Explainer:
+Source 1 (unconfimred - Windows):
+- https://neosmart.net/blog/recreating-epstein-pdfs-from-raw-encoded-attachments/
+- https://neosmart.net/blog/efta00400459-has-been-cracked-dbc12-pdf-liberated/
+- https://github.com/vExcess/epstein-ocr (github-explainer)
+- https://archive.org/details/efta-00400459_pages
+
+Source 2 (Linux and MacOS):
+- https://www.reddit.com/r/Epstein/comments/1qy2qz1/efta00400459_base64_decoded_instructions_to/ (reddit-explainer.pdf)
+- https://github.com/KoKuToru/extract_attachment_EFTA00400459
+
+Soruce 3 (unconfirmed):
+- https://github.com/wigglyworm91/courier-new-ocr/blob/master/readme.md
+- https://archive.org/download/efta-00400459-lossless-webp

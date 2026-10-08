@@ -1,0 +1,16 @@
+
+# Example 1: basic recovery programmatically
+
+cd examples/01-basic-recovery
+# view input.png
+unpixel --redaction mosaic --charset "admin xyz0" -b 8 images/admin.png
+
+cd ../..
+
+
+# Example 2: JSON output
+
+cd examples/06-automation
+unpixel --redaction mosaic --charset "admin xyz0" -b 8 --format json images/admin.png
+cd ../..
+
